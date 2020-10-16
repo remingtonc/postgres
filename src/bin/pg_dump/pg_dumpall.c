@@ -82,6 +82,7 @@ static int	no_role_passwords = 0;
 static int	server_version;
 static int	load_via_partition_root = 0;
 static int	on_conflict_do_nothing = 0;
+static int	no_alter_role = 0;
 
 static char role_catalog[10];
 #define PG_AUTHID "pg_authid"
@@ -147,6 +148,7 @@ main(int argc, char *argv[])
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 		{"on-conflict-do-nothing", no_argument, &on_conflict_do_nothing, 1},
 		{"rows-per-insert", required_argument, NULL, 7},
+		{"no-alter-role", no_argument, &no_alter_role, 1},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -897,10 +899,17 @@ dumpRoles(PGconn *conn)
 		 * have failed to drop it.  binary_upgrade cannot generate any errors,
 		 * so we assume the current role is already created.
 		 */
-		if (!binary_upgrade ||
-			strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
-			appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
-		appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+		if (binary_upgrade) {
+			appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+		} else {
+			if (no_alter_role) {
+				appendPQExpBuffer(buf, "CREATE ROLE %s WITH", fmtId(rolename));
+			} else {
+				if (strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
+					appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
+				appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+			}
+		}
 
 		if (strcmp(PQgetvalue(res, i, i_rolsuper), "t") == 0)
 			appendPQExpBufferStr(buf, " SUPERUSER");
