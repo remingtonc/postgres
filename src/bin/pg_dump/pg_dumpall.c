@@ -26,6 +26,7 @@
 #include "common/logging.h"
 #include "fe_utils/connect.h"
 #include "fe_utils/string_utils.h"
+#include "ini.h"
 
 /* version string we expect back from pg_dump */
 #define PGDUMP_VERSIONSTR "pg_dump (PostgreSQL) " PG_VERSION "\n"
@@ -96,6 +97,28 @@ static SimpleStringList database_exclude_names = {NULL, NULL};
 
 #define exit_nicely(code) exit(code)
 
+typedef struct
+{
+    SimpleStringList names;
+    SimpleStringList passwords;
+} RoleCreds;
+static RoleCreds role_creds = {{NULL, NULL}, {NULL, NULL}};
+static int merge_role_creds = 0;
+
+static int role_cred_handler(void* creds, const char* section, const char* name, const char* value)
+{
+    RoleCreds* pcreds = (RoleCreds*)creds;
+
+	if (!simple_string_list_member(&(pcreds->names), name)) {
+		simple_string_list_append(&(pcreds->names), strdup(name));
+		simple_string_list_append(&(pcreds->passwords), strdup(value));
+	} else {
+		pg_log_error("ROLE %s specified more than once!", name);
+		return 0;
+	}
+	return 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -149,6 +172,7 @@ main(int argc, char *argv[])
 		{"on-conflict-do-nothing", no_argument, &on_conflict_do_nothing, 1},
 		{"rows-per-insert", required_argument, NULL, 7},
 		{"no-alter-role", no_argument, &no_alter_role, 1},
+		{"merge-credentials-file", required_argument, NULL, 8},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -170,6 +194,7 @@ main(int argc, char *argv[])
 	int			c,
 				ret;
 	int			optindex;
+	char	   *merge_credentials_file = NULL;
 
 	pg_logging_init(argv[0]);
 	pg_logging_set_level(PG_LOG_WARNING);
@@ -336,6 +361,11 @@ main(int argc, char *argv[])
 				appendPQExpBufferStr(pgdumpopts, " --rows-per-insert ");
 				appendShellString(pgdumpopts, optarg);
 				break;
+			
+			case 8:
+				merge_credentials_file = pg_strdup(optarg);
+				merge_role_creds = 1;
+				break;
 
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
@@ -391,6 +421,15 @@ main(int argc, char *argv[])
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 				progname);
 		exit_nicely(1);
+	}
+
+	if (merge_credentials_file != NULL)
+	{
+		if (ini_parse(merge_credentials_file, role_cred_handler, &role_creds) < 0)
+		{
+			pg_log_error("merge_credentials_file appears invalid.");
+			exit_nicely(1);
+		}
 	}
 
 	/*
@@ -646,6 +685,9 @@ help(void)
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
+	printf(_("  --merge-credentials-file=FILENAME\n"
+	   		 "                               merge passwords from file if not present\n"));
+	printf(_("  --no-alter-role              do not alter role, only create\n"));
 	printf(_("  --no-comments                do not dump comments\n"));
 	printf(_("  --no-publications            do not dump publications\n"));
 	printf(_("  --no-role-passwords          do not dump passwords for roles\n"));
@@ -899,12 +941,14 @@ dumpRoles(PGconn *conn)
 		 * have failed to drop it.  binary_upgrade cannot generate any errors,
 		 * so we assume the current role is already created.
 		 */
-		if (binary_upgrade) {
+		if (binary_upgrade)
 			appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
-		} else {
-			if (no_alter_role) {
+		else
+		{
+			if (no_alter_role)
 				appendPQExpBuffer(buf, "CREATE ROLE %s WITH", fmtId(rolename));
-			} else {
+			else
+			{
 				if (strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
 					appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
 				appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
@@ -955,6 +999,23 @@ dumpRoles(PGconn *conn)
 		{
 			appendPQExpBufferStr(buf, " PASSWORD ");
 			appendStringLiteralConn(buf, PQgetvalue(res, i, i_rolpassword), conn);
+		}
+		else if (merge_role_creds)
+		{
+			const int role_creds_index = simple_string_list_search(&(role_creds.names), rolename);
+			if (role_creds_index < 0)
+				pg_log_warning("No merge password specified for ROLE %s.", rolename);
+			else
+			{
+				const char *merge_password = simple_string_list_traverse(&(role_creds.passwords), role_creds_index);
+				if (merge_password == NULL)
+					pg_log_error("Merge password for ROLE %s is NULL. This should not happen.", rolename);
+				else
+				{
+					appendPQExpBufferStr(buf, " PASSWORD ");
+					appendStringLiteralConn(buf, merge_password, conn);
+				}
+			}
 		}
 
 		if (!PQgetisnull(res, i, i_rolvaliduntil))
