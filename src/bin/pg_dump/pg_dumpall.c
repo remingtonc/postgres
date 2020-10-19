@@ -95,6 +95,9 @@ static char *filename = NULL;
 static SimpleStringList database_exclude_patterns = {NULL, NULL};
 static SimpleStringList database_exclude_names = {NULL, NULL};
 
+static SimpleStringList role_exclude_patterns = {NULL, NULL};
+static SimpleStringList role_exclude_names = {NULL, NULL};
+
 #define exit_nicely(code) exit(code)
 
 typedef struct
@@ -173,6 +176,7 @@ main(int argc, char *argv[])
 		{"rows-per-insert", required_argument, NULL, 7},
 		{"no-alter-role", no_argument, &no_alter_role, 1},
 		{"merge-credentials-file", required_argument, NULL, 8},
+		{"exclude-role", required_argument, NULL, 9},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -361,10 +365,14 @@ main(int argc, char *argv[])
 				appendPQExpBufferStr(pgdumpopts, " --rows-per-insert ");
 				appendShellString(pgdumpopts, optarg);
 				break;
-			
+
 			case 8:
 				merge_credentials_file = pg_strdup(optarg);
 				merge_role_creds = 1;
+				break;
+
+			case 9:
+				simple_string_list_append(&role_exclude_patterns, optarg);
 				break;
 
 			default:
@@ -514,6 +522,12 @@ main(int argc, char *argv[])
 	 */
 	expand_dbname_patterns(conn, &database_exclude_patterns,
 						   &database_exclude_names);
+
+	/*
+	 * Get a list of role names that match the exclude patterns
+	 */
+	expand_role_name_patterns(conn, &role_exclude_patterns,
+						   &role_exclude_names);
 
 	/*
 	 * Open the output file if required, otherwise use stdout
@@ -681,6 +695,7 @@ help(void)
 	printf(_("  --disable-dollar-quoting     disable dollar quoting, use SQL standard quoting\n"));
 	printf(_("  --disable-triggers           disable triggers during data-only restore\n"));
 	printf(_("  --exclude-database=PATTERN   exclude databases whose name matches PATTERN\n"));
+	printf(_("  --exclude-role=PATTERN       exclude roles whose name matches PATTERN\n"));
 	printf(_("  --extra-float-digits=NUM     override default setting for extra_float_digits\n"));
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
@@ -922,6 +937,15 @@ dumpRoles(PGconn *conn)
 						   rolename);
 			continue;
 		}
+
+		/* Skip any explicitly excluded roles */
+		if (simple_string_list_member(&role_exclude_names, rolename))
+		{
+			pg_log_info("excluding role \"%s\"", rolename);
+			continue;
+		}
+
+		pg_log_info("dumping role \"%s\"", rolename);
 
 		resetPQExpBuffer(buf);
 
@@ -1507,6 +1531,77 @@ expand_dbname_patterns(PGconn *conn,
 		processSQLNamePattern(conn, query, cell->val, false,
 							  false, NULL, "datname", NULL, NULL);
 
+		res = executeQuery(conn, query->data);
+		for (int i = 0; i < PQntuples(res); i++)
+		{
+			simple_string_list_append(names, PQgetvalue(res, i, 0));
+		}
+
+		PQclear(res);
+		resetPQExpBuffer(query);
+	}
+
+	destroyPQExpBuffer(query);
+}
+
+/*
+ * Find a list of role names that match the given patterns.
+ */
+static void
+expand_role_name_patterns(PGconn *conn,
+					   SimpleStringList *patterns,
+					   SimpleStringList *names)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+
+	if (patterns->head == NULL)
+		return;					/* nothing to do */
+
+	query = createPQExpBuffer();
+
+	/*
+	 * The loop below runs multiple SELECTs, which might sometimes result in
+	 * duplicate entries in the name list, but we don't care, since all we're
+	 * going to do is test membership of the list.
+	 */
+
+	for (SimpleStringListCell *cell = patterns->head; cell; cell = cell->next)
+	{
+		if (server_version >= 90600)
+			appendPQExpBuffer(query,
+							  "SELECT rolname "
+							  "FROM %s "
+							  "WHERE rolname !~ '^pg_'", 
+							  role_catalog);
+		else if (server_version >= 80100)
+			appendPQExpBuffer(query,
+							  "SELECT rolname "
+							  "FROM %s",
+							  role_catalog);
+		else
+			appendPQExpBuffer(query,
+							  "SELECT usename as rolname "
+							  "FROM pg_shadow "
+							  "UNION ALL "
+							  "SELECT 0 as oid, groname as rolname, "
+							  "false as rolsuper, "
+							  "true as rolinherit, "
+							  "false as rolcreaterole, "
+							  "false as rolcreatedb, "
+							  "false as rolcanlogin, "
+							  "-1 as rolconnlimit, "
+							  "null::text as rolpassword, "
+							  "null::timestamptz as rolvaliduntil, "
+							  "false as rolreplication, "
+							  "false as rolbypassrls, "
+							  "null as rolcomment, "
+							  "false AS is_current_user "
+							  "FROM pg_group "
+							  "WHERE NOT EXISTS (SELECT 1 FROM pg_shadow "
+							  "WHERE usename = groname)");
+		processSQLNamePattern(conn, query, cell->val, false,
+							  false, NULL, "rolname", NULL, NULL);
 		res = executeQuery(conn, query->data);
 		for (int i = 0; i < PQntuples(res); i++)
 		{
