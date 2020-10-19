@@ -56,6 +56,8 @@ static PGresult *executeQuery(PGconn *conn, const char *query);
 static void executeCommand(PGconn *conn, const char *query);
 static void expand_dbname_patterns(PGconn *conn, SimpleStringList *patterns,
 								   SimpleStringList *names);
+static void expand_role_name_patterns(PGconn *conn, SimpleStringList *patterns,
+								      SimpleStringList *names);
 
 static char pg_dump_bin[MAXPGPATH];
 static const char *progname;
