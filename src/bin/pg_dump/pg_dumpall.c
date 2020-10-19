@@ -1031,9 +1031,11 @@ dumpRoles(PGconn *conn)
 		{
 			const int role_creds_index = simple_string_list_search(&(role_creds.names), rolename);
 			if (role_creds_index < 0)
+			{
 				pg_log_warning("No merge PASSWORD specified for ROLE %s.", rolename);
 				if (strcmp(PQgetvalue(res, i, i_rolcanlogin), "t") == 0)
-					pg_log_error("ROLE %s has LOGIN and no PASSWORD for merge!", rolename)
+					pg_log_error("ROLE %s has LOGIN and no PASSWORD for merge!", rolename);
+			}
 			else
 			{
 				const char *merge_password = simple_string_list_traverse(&(role_creds.passwords), role_creds_index);
