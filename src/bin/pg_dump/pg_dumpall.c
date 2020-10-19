@@ -1570,18 +1570,23 @@ expand_role_name_patterns(PGconn *conn,
 
 	for (SimpleStringListCell *cell = patterns->head; cell; cell = cell->next)
 	{
+		bool have_where = false;
 		if (server_version >= 90600)
+		{
 			appendPQExpBuffer(query,
 							  "SELECT rolname "
 							  "FROM %s "
 							  "WHERE rolname !~ '^pg_'", 
 							  role_catalog);
+			have_where = true;
+		}
 		else if (server_version >= 80100)
 			appendPQExpBuffer(query,
 							  "SELECT rolname "
-							  "FROM %s",
+							  "FROM %s ",
 							  role_catalog);
 		else
+		{
 			appendPQExpBuffer(query,
 							  "SELECT usename as rolname "
 							  "FROM pg_shadow "
@@ -1601,8 +1606,10 @@ expand_role_name_patterns(PGconn *conn,
 							  "false AS is_current_user "
 							  "FROM pg_group "
 							  "WHERE NOT EXISTS (SELECT 1 FROM pg_shadow "
-							  "WHERE usename = groname)");
-		processSQLNamePattern(conn, query, cell->val, false,
+							  "WHERE usename = groname) ");
+			have_where = true;
+		}
+		processSQLNamePattern(conn, query, cell->val, have_where,
 							  false, NULL, "rolname", NULL, NULL);
 		res = executeQuery(conn, query->data);
 		for (int i = 0; i < PQntuples(res); i++)
