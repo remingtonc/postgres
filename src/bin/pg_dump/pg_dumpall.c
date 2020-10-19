@@ -86,6 +86,7 @@ static int	server_version;
 static int	load_via_partition_root = 0;
 static int	on_conflict_do_nothing = 0;
 static int	no_alter_role = 0;
+static int 	no_granted_by = 0;
 
 static char role_catalog[10];
 #define PG_AUTHID "pg_authid"
@@ -113,7 +114,6 @@ static int merge_role_creds = 0;
 static int role_cred_handler(void* creds, const char* section, const char* name, const char* value)
 {
     RoleCreds* pcreds = (RoleCreds*)creds;
-
 	if (!simple_string_list_member(&(pcreds->names), name)) {
 		simple_string_list_append(&(pcreds->names), strdup(name));
 		simple_string_list_append(&(pcreds->passwords), strdup(value));
@@ -179,6 +179,7 @@ main(int argc, char *argv[])
 		{"no-alter-role", no_argument, &no_alter_role, 1},
 		{"merge-credentials-file", required_argument, NULL, 8},
 		{"exclude-role", required_argument, NULL, 9},
+		{"no-granted-by", no_argument, &no_granted_by, 1},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -1030,12 +1031,14 @@ dumpRoles(PGconn *conn)
 		{
 			const int role_creds_index = simple_string_list_search(&(role_creds.names), rolename);
 			if (role_creds_index < 0)
-				pg_log_warning("No merge password specified for ROLE %s.", rolename);
+				pg_log_warning("No merge PASSWORD specified for ROLE %s.", rolename);
+				if (strcmp(PQgetvalue(res, i, i_rolcanlogin), "t") == 0)
+					pg_log_error("ROLE %s has LOGIN and no PASSWORD for merge!", rolename)
 			else
 			{
 				const char *merge_password = simple_string_list_traverse(&(role_creds.passwords), role_creds_index);
 				if (merge_password == NULL)
-					pg_log_error("Merge password for ROLE %s is NULL. This should not happen.", rolename);
+					pg_log_error("Merge PASSWORD for ROLE %s is NULL. This should not happen.", rolename);
 				else
 				{
 					appendPQExpBufferStr(buf, " PASSWORD ");
@@ -1124,7 +1127,7 @@ dumpRoleMembership(PGconn *conn)
 		 * We don't track the grantor very carefully in the backend, so cope
 		 * with the possibility that it has been dropped.
 		 */
-		if (!PQgetisnull(res, i, 3))
+		if (!PQgetisnull(res, i, 3) && !no_granted_by)
 		{
 			char	   *grantor = PQgetvalue(res, i, 3);
 
