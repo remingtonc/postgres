@@ -705,8 +705,9 @@ help(void)
 	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
 	printf(_("  --merge-credentials-file=FILENAME\n"
 	   		 "                               merge passwords from file if not present\n"));
-	printf(_("  --no-alter-role              do not alter role, only create\n"));
+	printf(_("  --no-alter-role              do not alter role, create with all attributes\n"));
 	printf(_("  --no-comments                do not dump comments\n"));
+	printf(_("  --no-granted-by              do not dump GRANTED BY in ROLE statements\n"));
 	printf(_("  --no-publications            do not dump publications\n"));
 	printf(_("  --no-role-passwords          do not dump passwords for roles\n"));
 	printf(_("  --no-security-labels         do not dump security label assignments\n"));
