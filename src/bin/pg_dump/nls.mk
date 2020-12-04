@@ -6,8 +6,8 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    pg_backup_null.c pg_backup_tar.c \
                    pg_backup_directory.c dumputils.c compress_io.c \
                    pg_dump.c common.c pg_dump_sort.c \
-                   pg_restore.c pg_dumpall.c \
-                   parallel.c parallel.h pg_backup_utils.c pg_backup_utils.h \
+                   pg_restore.c pg_dumpall.c ini.c \
+                   parallel.c parallel.h pg_backup_utils.c pg_backup_utils.h ini.h \
                    ../../common/exec.c ../../common/fe_memutils.c \
                    ../../common/wait_error.c
 GETTEXT_TRIGGERS = $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \

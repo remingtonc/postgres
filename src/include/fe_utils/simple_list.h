@@ -62,6 +62,10 @@ extern void simple_string_list_append(SimpleStringList *list, const char *val);
 extern bool simple_string_list_member(SimpleStringList *list, const char *val);
 
 extern const char *simple_string_list_not_touched(SimpleStringList *list);
+extern void simple_string_list_reset_touched(SimpleStringList *list);
+
+extern const int simple_string_list_search(SimpleStringList *list, const char *val);
+extern const char *simple_string_list_traverse(SimpleStringList *list, const int iterations);
 
 extern void simple_ptr_list_append(SimplePtrList *list, void *val);
 

@@ -116,6 +116,53 @@ simple_string_list_not_touched(SimpleStringList *list)
 }
 
 /*
+ * Reset the touched state of the list entries.
+ */
+void
+simple_string_list_reset_touched(SimpleStringList *list)
+{
+	SimpleStringListCell *cell;
+
+	for (cell = list->head; cell; cell = cell->next)
+	{
+		cell->touched = false;
+	}
+}
+
+/*
+ * Search for value in list and return its index.
+ */
+const int simple_string_list_search(SimpleStringList *list, const char *val) {
+	SimpleStringListCell *cell;
+	int index;
+
+	for (cell = list->head, index = 0; cell; cell = cell->next, ++index)
+	{
+		if (strcmp(cell->val, val) == 0)
+		{
+			cell->touched = true;
+			return index;
+		}
+	}
+	return -1;
+}
+
+/*
+ * Retrieve value at index.
+ */
+const char *simple_string_list_traverse(SimpleStringList *list, const int index) {
+	SimpleStringListCell *cell;
+	int curr_index;
+
+	for (cell = list->head, curr_index = 0; cell && curr_index <= index; cell = cell->next, curr_index++)
+	{
+		if (curr_index == index)
+			return cell->val;
+	}
+	return NULL;
+}
+
+/*
  * Append a pointer to the list.
  *
  * Caller must ensure that the pointer remains valid.

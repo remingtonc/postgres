@@ -26,6 +26,7 @@
 #include "common/logging.h"
 #include "fe_utils/connect.h"
 #include "fe_utils/string_utils.h"
+#include "ini.h"
 
 /* version string we expect back from pg_dump */
 #define PGDUMP_VERSIONSTR "pg_dump (PostgreSQL) " PG_VERSION "\n"
@@ -55,6 +56,8 @@ static PGresult *executeQuery(PGconn *conn, const char *query);
 static void executeCommand(PGconn *conn, const char *query);
 static void expand_dbname_patterns(PGconn *conn, SimpleStringList *patterns,
 								   SimpleStringList *names);
+static void expand_role_name_patterns(PGconn *conn, SimpleStringList *patterns,
+								      SimpleStringList *names);
 
 static char pg_dump_bin[MAXPGPATH];
 static const char *progname;
@@ -82,6 +85,8 @@ static int	no_role_passwords = 0;
 static int	server_version;
 static int	load_via_partition_root = 0;
 static int	on_conflict_do_nothing = 0;
+static int	no_alter_role = 0;
+static int 	no_granted_by = 0;
 
 static char role_catalog[10];
 #define PG_AUTHID "pg_authid"
@@ -93,7 +98,31 @@ static char *filename = NULL;
 static SimpleStringList database_exclude_patterns = {NULL, NULL};
 static SimpleStringList database_exclude_names = {NULL, NULL};
 
+static SimpleStringList role_exclude_patterns = {NULL, NULL};
+static SimpleStringList role_exclude_names = {NULL, NULL};
+
 #define exit_nicely(code) exit(code)
+
+typedef struct
+{
+    SimpleStringList names;
+    SimpleStringList passwords;
+} RoleCreds;
+static RoleCreds role_creds = {{NULL, NULL}, {NULL, NULL}};
+static int merge_role_creds = 0;
+
+static int role_cred_handler(void* creds, const char* section, const char* name, const char* value)
+{
+    RoleCreds* pcreds = (RoleCreds*)creds;
+	if (!simple_string_list_member(&(pcreds->names), name)) {
+		simple_string_list_append(&(pcreds->names), strdup(name));
+		simple_string_list_append(&(pcreds->passwords), strdup(value));
+	} else {
+		pg_log_error("ROLE %s specified more than once!", name);
+		return 0;
+	}
+	return 1;
+}
 
 int
 main(int argc, char *argv[])
@@ -147,6 +176,10 @@ main(int argc, char *argv[])
 		{"no-unlogged-table-data", no_argument, &no_unlogged_table_data, 1},
 		{"on-conflict-do-nothing", no_argument, &on_conflict_do_nothing, 1},
 		{"rows-per-insert", required_argument, NULL, 7},
+		{"no-alter-role", no_argument, &no_alter_role, 1},
+		{"merge-credentials-file", required_argument, NULL, 8},
+		{"exclude-role", required_argument, NULL, 9},
+		{"no-granted-by", no_argument, &no_granted_by, 1},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -168,6 +201,7 @@ main(int argc, char *argv[])
 	int			c,
 				ret;
 	int			optindex;
+	char	   *merge_credentials_file = NULL;
 
 	pg_logging_init(argv[0]);
 	pg_logging_set_level(PG_LOG_WARNING);
@@ -335,6 +369,15 @@ main(int argc, char *argv[])
 				appendShellString(pgdumpopts, optarg);
 				break;
 
+			case 8:
+				merge_credentials_file = pg_strdup(optarg);
+				merge_role_creds = 1;
+				break;
+
+			case 9:
+				simple_string_list_append(&role_exclude_patterns, optarg);
+				break;
+
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit_nicely(1);
@@ -389,6 +432,15 @@ main(int argc, char *argv[])
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 				progname);
 		exit_nicely(1);
+	}
+
+	if (merge_credentials_file != NULL)
+	{
+		if (ini_parse(merge_credentials_file, role_cred_handler, &role_creds) < 0)
+		{
+			pg_log_error("merge_credentials_file appears invalid.");
+			exit_nicely(1);
+		}
 	}
 
 	/*
@@ -473,6 +525,12 @@ main(int argc, char *argv[])
 	 */
 	expand_dbname_patterns(conn, &database_exclude_patterns,
 						   &database_exclude_names);
+
+	/*
+	 * Get a list of role names that match the exclude patterns
+	 */
+	expand_role_name_patterns(conn, &role_exclude_patterns,
+						   &role_exclude_names);
 
 	/*
 	 * Open the output file if required, otherwise use stdout
@@ -640,11 +698,16 @@ help(void)
 	printf(_("  --disable-dollar-quoting     disable dollar quoting, use SQL standard quoting\n"));
 	printf(_("  --disable-triggers           disable triggers during data-only restore\n"));
 	printf(_("  --exclude-database=PATTERN   exclude databases whose name matches PATTERN\n"));
+	printf(_("  --exclude-role=PATTERN       exclude roles whose name matches PATTERN\n"));
 	printf(_("  --extra-float-digits=NUM     override default setting for extra_float_digits\n"));
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
 	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
+	printf(_("  --merge-credentials-file=FILENAME\n"
+	   		 "                               merge passwords from file if not present\n"));
+	printf(_("  --no-alter-role              do not alter role, create with all attributes\n"));
 	printf(_("  --no-comments                do not dump comments\n"));
+	printf(_("  --no-granted-by              do not dump GRANTED BY in ROLE statements\n"));
 	printf(_("  --no-publications            do not dump publications\n"));
 	printf(_("  --no-role-passwords          do not dump passwords for roles\n"));
 	printf(_("  --no-security-labels         do not dump security label assignments\n"));
@@ -879,6 +942,15 @@ dumpRoles(PGconn *conn)
 			continue;
 		}
 
+		/* Skip any explicitly excluded roles */
+		if (simple_string_list_member(&role_exclude_names, rolename))
+		{
+			pg_log_info("excluding role \"%s\"", rolename);
+			continue;
+		}
+
+		pg_log_info("dumping role \"%s\"", rolename);
+
 		resetPQExpBuffer(buf);
 
 		if (binary_upgrade)
@@ -897,10 +969,19 @@ dumpRoles(PGconn *conn)
 		 * have failed to drop it.  binary_upgrade cannot generate any errors,
 		 * so we assume the current role is already created.
 		 */
-		if (!binary_upgrade ||
-			strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
-			appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
-		appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+		if (binary_upgrade)
+			appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+		else
+		{
+			if (no_alter_role)
+				appendPQExpBuffer(buf, "CREATE ROLE %s WITH", fmtId(rolename));
+			else
+			{
+				if (strcmp(PQgetvalue(res, i, i_is_current_user), "f") == 0)
+					appendPQExpBuffer(buf, "CREATE ROLE %s;\n", fmtId(rolename));
+				appendPQExpBuffer(buf, "ALTER ROLE %s WITH", fmtId(rolename));
+			}
+		}
 
 		if (strcmp(PQgetvalue(res, i, i_rolsuper), "t") == 0)
 			appendPQExpBufferStr(buf, " SUPERUSER");
@@ -946,6 +1027,23 @@ dumpRoles(PGconn *conn)
 		{
 			appendPQExpBufferStr(buf, " PASSWORD ");
 			appendStringLiteralConn(buf, PQgetvalue(res, i, i_rolpassword), conn);
+		}
+		else if (merge_role_creds)
+		{
+			const int role_creds_index = simple_string_list_search(&(role_creds.names), rolename);
+			if (role_creds_index < 0 && strcmp(PQgetvalue(res, i, i_rolcanlogin), "t") == 0)
+				pg_log_warning("ROLE %s has LOGIN and no PASSWORD for merge!", rolename);
+			else
+			{
+				const char *merge_password = simple_string_list_traverse(&(role_creds.passwords), role_creds_index);
+				if (merge_password == NULL)
+					pg_log_error("Merge PASSWORD for ROLE %s is NULL. This should not happen.", rolename);
+				else
+				{
+					appendPQExpBufferStr(buf, " PASSWORD ");
+					appendStringLiteralConn(buf, merge_password, conn);
+				}
+			}
 		}
 
 		if (!PQgetisnull(res, i, i_rolvaliduntil))
@@ -1028,7 +1126,7 @@ dumpRoleMembership(PGconn *conn)
 		 * We don't track the grantor very carefully in the backend, so cope
 		 * with the possibility that it has been dropped.
 		 */
-		if (!PQgetisnull(res, i, 3))
+		if (!PQgetisnull(res, i, 3) && !no_granted_by)
 		{
 			char	   *grantor = PQgetvalue(res, i, 3);
 
@@ -1437,6 +1535,84 @@ expand_dbname_patterns(PGconn *conn,
 		processSQLNamePattern(conn, query, cell->val, false,
 							  false, NULL, "datname", NULL, NULL);
 
+		res = executeQuery(conn, query->data);
+		for (int i = 0; i < PQntuples(res); i++)
+		{
+			simple_string_list_append(names, PQgetvalue(res, i, 0));
+		}
+
+		PQclear(res);
+		resetPQExpBuffer(query);
+	}
+
+	destroyPQExpBuffer(query);
+}
+
+/*
+ * Find a list of role names that match the given patterns.
+ */
+static void
+expand_role_name_patterns(PGconn *conn,
+					   SimpleStringList *patterns,
+					   SimpleStringList *names)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+
+	if (patterns->head == NULL)
+		return;					/* nothing to do */
+
+	query = createPQExpBuffer();
+
+	/*
+	 * The loop below runs multiple SELECTs, which might sometimes result in
+	 * duplicate entries in the name list, but we don't care, since all we're
+	 * going to do is test membership of the list.
+	 */
+
+	for (SimpleStringListCell *cell = patterns->head; cell; cell = cell->next)
+	{
+		bool have_where = false;
+		if (server_version >= 90600)
+		{
+			appendPQExpBuffer(query,
+							  "SELECT rolname "
+							  "FROM %s "
+							  "WHERE rolname !~ '^pg_'", 
+							  role_catalog);
+			have_where = true;
+		}
+		else if (server_version >= 80100)
+			appendPQExpBuffer(query,
+							  "SELECT rolname "
+							  "FROM %s ",
+							  role_catalog);
+		else
+		{
+			appendPQExpBuffer(query,
+							  "SELECT usename as rolname "
+							  "FROM pg_shadow "
+							  "UNION ALL "
+							  "SELECT 0 as oid, groname as rolname, "
+							  "false as rolsuper, "
+							  "true as rolinherit, "
+							  "false as rolcreaterole, "
+							  "false as rolcreatedb, "
+							  "false as rolcanlogin, "
+							  "-1 as rolconnlimit, "
+							  "null::text as rolpassword, "
+							  "null::timestamptz as rolvaliduntil, "
+							  "false as rolreplication, "
+							  "false as rolbypassrls, "
+							  "null as rolcomment, "
+							  "false AS is_current_user "
+							  "FROM pg_group "
+							  "WHERE NOT EXISTS (SELECT 1 FROM pg_shadow "
+							  "WHERE usename = groname) ");
+			have_where = true;
+		}
+		processSQLNamePattern(conn, query, cell->val, have_where,
+							  false, NULL, "rolname", NULL, NULL);
 		res = executeQuery(conn, query->data);
 		for (int i = 0; i < PQntuples(res); i++)
 		{
